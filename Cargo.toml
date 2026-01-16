@@ -1,0 +1,6 @@
+[workspace]
+members = [
+  "crates/file-sandbox-core",
+  "crates/file-sandbox-cli",
+]
+resolver = "2"
