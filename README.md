@@ -10,22 +10,30 @@ cargo build --release
 
 ## Usage
 
+After building, you can run the tool using `cargo run --release --`:
+
 Analyze a file and display the JSON report:
 
 ```bash
-file-sandbox analyze <file>
+cargo run --release -- analyze <file>
 ```
 
 Save the report to a JSON file:
 
 ```bash
-file-sandbox analyze <file> --json report.json
+cargo run --release -- analyze <file> --json report.json
 ```
 
 ## Example
 
 ```bash
-file-sandbox analyze suspicious.exe --json analysis.json
+cargo run --release -- analyze suspicious.exe --json analysis.json
+```
+
+Alternatively, you can run the binary directly:
+
+```bash
+./target/release/file-sandbox-cli.exe analyze <file> --json report.json
 ```
 
 ## Features
