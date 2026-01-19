@@ -25,6 +25,4 @@ reports/
 *.json
 *.html
 test_*
-
-# Context file (internal notes)
 context.md
