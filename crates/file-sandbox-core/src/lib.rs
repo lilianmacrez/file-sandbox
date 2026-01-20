@@ -1,5 +1,6 @@
 use serde::Serialize;
 use std::{
+    collections::HashSet,
     fs::File,
     io::{BufReader, Read},
     path::Path,
@@ -19,6 +20,7 @@ pub struct ArtifactReport {
     pub schema_version: u32,
     pub file: FileInfo,
     pub strings: StringsInfo,
+    pub iocs: IOCInfo,
 }
 
 #[derive(Serialize)]
@@ -44,12 +46,24 @@ pub struct StringsInfo {
     pub utf16le_samples: Vec<String>,
 }
 
+#[derive(Serialize)]
+pub struct IOCInfo {
+    pub urls: Vec<String>,
+    pub domains: Vec<String>,
+    pub ips: Vec<String>,
+    pub emails: Vec<String>,
+    pub windows_paths: Vec<String>,
+    pub linux_paths: Vec<String>,
+    pub suspicious_commands: Vec<String>,
+}
+
 pub fn analyze_file(path: &Path) -> Result<ArtifactReport, SandboxError> {
     let meta = std::fs::metadata(path)?;
     let size = meta.len();
 
     let hashes = compute_hashes(path)?;
     let strings = extract_strings(path)?;
+    let iocs = extract_iocs(path)?;
 
     Ok(ArtifactReport {
         schema_version: 1,
@@ -59,6 +73,7 @@ pub fn analyze_file(path: &Path) -> Result<ArtifactReport, SandboxError> {
             hashes,
         },
         strings,
+        iocs,
     })
 }
 
@@ -185,4 +200,117 @@ fn extract_utf16le_strings(data: &[u8]) -> Vec<String> {
     }
     
     strings
+}
+
+fn extract_iocs(path: &Path) -> Result<IOCInfo, SandboxError> {
+    let data = std::fs::read(path)?;
+    let text = String::from_utf8_lossy(&data);
+    
+    // Combine all strings for IOC extraction
+    let strings = extract_strings(path)?;
+    let mut all_text = strings.ascii_samples.join(" ");
+    all_text.push_str(&strings.utf16le_samples.join(" "));
+    all_text.push_str(&text);
+    
+    // Extract IOCs using regex
+    let urls = extract_urls(&all_text);
+    let domains = extract_domains(&all_text);
+    let ips = extract_ips(&all_text);
+    let emails = extract_emails(&all_text);
+    let windows_paths = extract_windows_paths(&all_text);
+    let linux_paths = extract_linux_paths(&all_text);
+    let suspicious_commands = extract_suspicious_commands(&all_text);
+    
+    Ok(IOCInfo {
+        urls: deduplicate_and_sort(urls),
+        domains: deduplicate_and_sort(domains),
+        ips: deduplicate_and_sort(ips),
+        emails: deduplicate_and_sort(emails),
+        windows_paths: deduplicate_and_sort(windows_paths),
+        linux_paths: deduplicate_and_sort(linux_paths),
+        suspicious_commands: deduplicate_and_sort(suspicious_commands),
+    })
+}
+
+fn extract_urls(text: &str) -> Vec<String> {
+    // Match http://, https://, ftp:// URLs
+    let re = regex::Regex::new("https?://[^\\s<>\"'|\\\\^`\\[\\]]+").unwrap();
+    re.find_iter(text)
+        .map(|m| m.as_str().to_string())
+        .collect()
+}
+
+fn extract_domains(text: &str) -> Vec<String> {
+    // Match domain names (simplified: word.word.tld)
+    let re = regex::Regex::new(r"\b[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*\.[a-zA-Z]{2,}\b").unwrap();
+    re.find_iter(text)
+        .map(|m| m.as_str().to_string())
+        .filter(|s| !s.starts_with("http") && !s.contains("@")) // Exclude URLs and emails
+        .collect()
+}
+
+fn extract_ips(text: &str) -> Vec<String> {
+    // Match IPv4 addresses
+    let re = regex::Regex::new(r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b").unwrap();
+    re.find_iter(text)
+        .map(|m| m.as_str().to_string())
+        .collect()
+}
+
+fn extract_emails(text: &str) -> Vec<String> {
+    // Match email addresses
+    let re = regex::Regex::new(r"\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b").unwrap();
+    re.find_iter(text)
+        .map(|m| m.as_str().to_string())
+        .collect()
+}
+
+fn extract_windows_paths(text: &str) -> Vec<String> {
+    // Match Windows paths (C:\..., \\UNC paths)
+    let re = regex::Regex::new("(?:[A-Za-z]:|\\\\\\\\[^\\\\/]+)[\\\\][^\\s<>\"'|\\\\^`\\[\\]]+").unwrap();
+    re.find_iter(text)
+        .map(|m| m.as_str().to_string())
+        .collect()
+}
+
+fn extract_linux_paths(text: &str) -> Vec<String> {
+    // Match Linux/Unix paths (/path/to/file or ~/path)
+    let re = regex::Regex::new("(?:/|~/)[^\\s<>\"'|\\\\^`\\[\\]]+").unwrap();
+    re.find_iter(text)
+        .map(|m| m.as_str().to_string())
+        .filter(|s| s.len() > 1) // Filter out just "/"
+        .collect()
+}
+
+fn extract_suspicious_commands(text: &str) -> Vec<String> {
+    // Match suspicious command patterns
+    let patterns = vec![
+        r"powershell\s+-[eE]ncoded?Command",
+        r"cmd\s+/c",
+        r"wmic\s+",
+        r"schtasks\s+/",
+        r"reg\s+(add|delete|query)",
+        r"net\s+(user|localgroup|share)",
+        r"sc\s+(create|start|stop)",
+        r"taskkill\s+/",
+        r"bcdedit\s+",
+        r"vssadmin\s+",
+    ];
+    
+    let mut results = Vec::new();
+    for pattern in patterns {
+        if let Ok(re) = regex::Regex::new(&format!(r"(?i)\b{}", pattern)) {
+            for m in re.find_iter(text) {
+                results.push(m.as_str().to_string());
+            }
+        }
+    }
+    results
+}
+
+fn deduplicate_and_sort(mut items: Vec<String>) -> Vec<String> {
+    let set: HashSet<String> = items.drain(..).collect();
+    let mut result: Vec<String> = set.into_iter().collect();
+    result.sort();
+    result
 }
